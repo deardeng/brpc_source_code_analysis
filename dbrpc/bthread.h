@@ -139,6 +139,27 @@ extern int bthread_usleep(uint64_t microseconds);
 // Functions for mutex handling.
 // ---------------------------------------
 
+// Initialize `mutex' using attributes in `mutex_attr', or use the
+// default value is later is NULL.
+// NOTE: mutexattr is not used in current mutex implementation. User shall
+// always pass a NULL attribute.
+extern int bthread_mutex_init(bthread_mutex_t* __restrict mutex, const bthread_mutexattr_t* __restrict mutex_attr);
+
+// Destory `mutex'.
+extern int bthread_mutex_destroy(bthread_mutex_t* mutex);
+
+// Try to lock `mutex'.
+extern int bthread_mutex_trylock(bthread_mutex_t* mutex);
+
+// Wait until lock for `mutex' becomes available and lock it.
+extern int bthread_mutex_lock(bthread_mutex_t* mutex);
+
+// Wait until lock becomes available and lock it or time exceeds `abstime'
+extern int bthread_mutex_timedlock(bthread_mutex_t* __restrict mutex,
+        const struct timespec* __restrict abstime);
+
+// Unlock `mutex'.
+extern int bthread_mutex_unlock(bthread_mutex_t* mutex);
 
 
 #endif //BTHREAD_BTHREAD_H
