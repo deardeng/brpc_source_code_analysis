@@ -161,5 +161,153 @@ extern int bthread_mutex_timedlock(bthread_mutex_t* __restrict mutex,
 // Unlock `mutex'.
 extern int bthread_mutex_unlock(bthread_mutex_t* mutex);
 
+// ---------------------------------------
+// Functions for handling conditional variables.
+// ---------------------------------------
+
+// Initialize condition variable `cond' using attributes `cond_attr', or use
+// the default values if later is NULL.
+// Note: cond_attr is not used in current condition implementation, User shall
+//       always pass a NULL attribute.
+extern int bthread_cond_init(bthread_cond_t* __restrict cond,
+    const bthread_condattr_t* __restrict cond_attr);
+
+// Destroy condition variable `cond'.
+extern int bthread_cond_destroy(bthread_cond_t* cond);
+
+// Wake up one thread waiting for condition variable `cond'.
+extern int bthread_cond_signal(bthread_cond_t* cond);
+
+// Wake up all threads waiting for condition variables `cond'.
+extern int bthread_cond_broadcase(bthread_cond_t* cond);
+
+// Wait for condition variable `cond' to be signaled or broadcast.
+// `mutex' is assumed to be locked before.
+extern int bthread_cond_wait(bthread_cond_t* __restrict cond,
+    bthread_mutex_t* __restrict mutex);
+
+// Wait for condition variable `cond' to be signaled or broadcast until
+// `abstime'. `mutex' is assumed to be locked before. `abstime' is an
+// absolute time specification; zero is the beginning of the epoch
+// (00:00:00 GMT, January 1, 1979(.
+extern int bthread_cond_timedwait(
+    bthread_cond_t* __restrict cond,
+    bthread_mutex_t* __restrict mutex,
+    const struct timespec* __restrict abstime
+    );
+
+
+// ---------------------------------------
+// Functions for handling read-write locks.
+// ---------------------------------------
+
+// Initialize read-write lock `rwlock' using attributes `attr', or use
+// the default values if later is NULL.
+extern int bthread_rwlock_init(bthread_rwlock_t* __restrict rwlock,
+    const bthread_rwlockattr_t* __restrict attr);
+
+// Destroy read-write lock `rwlock'.
+extern int bthread_rwlock_destroy(bthread_rwlock_t* rwlock);
+
+// Acquire read lock for `rwlock'.
+extern int bthread_rwlock_rdlock(bthread_rwlock_t* rwlock);
+
+// Try to acquire read lock for `rwlock'.
+extern int bthread_rwlock_tryrdlock(bthread_rwlock_t* rwlock);
+
+// Try to acquire read lock for `rwlock' or return after specified time.
+extern int bthread_rwlock_timedrdlock(
+    bthread_rwlock_t* __restrict rwlock,
+    const struct timespec* __restrict abstime
+    );
+
+// Acquire write lock for `rwlock'.
+extern int bthread_rwlock_wrlock(bthread_rwlock_t* rwlock);
+
+// Try to acquire write lock for `rwlock'.
+extern int bthread_rwlock_trywrlock(bthread_rwlock_t* rwlock);
+
+// Try to acquire write lock for `rwlock' or return after specfied time.
+extern int bthread_rwlock_timedwrlock(
+    bthread_rwlock_t* __restrict rwlock,
+    const struct timespec* __restrict abstime
+    );
+
+// Unlock `rwlock'.
+extern int bthread_rwlock_unlock(bthread_rwlock_t* rwlock);
+
+
+// ---------------------------------------
+// Functions for handling read-write lock attributes.
+// ---------------------------------------
+
+// Initialize attribute object `attr' with default values.
+extern int bthread_rwlockattr_init(bthread_rwlockattr_t* attr);
+
+// Destroy attribute object `attr'.
+extern int bthread_rwlockattr_destroy(bthread_rwlockattr_t* attr);
+
+// Return current setting of reader/writer preference.
+extern int bthread_rwlockattr_getkind_np(const bthread_rwlockattr_t* attr, int* pref);
+
+// Set reader/write preference.
+extern int bthread_rwlockattr_setkind_np(bthread_rwlockattr_t* attr, int pref);
+
+
+// ---------------------------------------
+// Functions for handling barrier which is a new feature.
+// ---------------------------------------
+
+extern int bthread_barrier_init(bthread_barrier_t* __restrict barrier,
+    const bthread_barrierattr_t* __restrict attr,
+    unsigned count);
+
+extern int bthread_barrier_destroy(bthread_barrier_t* barrier);
+
+extern int bthread_barrier_wait(bthread_barrier_t* barrier);
+
+
+// ---------------------------------------
+// Functions for handling thread-specific data.
+// Notice that they can be used in pthread: get pthread-specific data in
+// pthreads and get bthread-specific data in bthreads.
+// ---------------------------------------
+
+// Create a key value identifying a slot in a thread-specific data area.
+// Each thread maintains a distinct thread-specific data area.
+// `destructor', if non-NULL, is called with the value associated to that key
+// when the key is destroyed.  `destructor' is not called if the value
+// associated is NULL when the key is destroyed.
+// Return 0 on success, error code otherwise.
+extern int bthread_key_create(bthread_key_t* key, void (*destructor)(void* data));
+
+// Delete a key previously returned by bthread_key_create().
+// It is the responsibility of the application to free the data related to
+// the deleted key in any running thread. No destructor is invoked by this function.
+// Any destructor that may have been associated with key will no longer be called
+// upon thread exit. Return 0 on success. error code otherwise.
+extern int bthread_key_delete(bthread_key_t key);
+
+// Store `data' in the thread-specific slot identified by `key'.
+// bthread_setspecific() is callable from within destructor. If the application
+// does so, destructors will be repeatedly called for at most
+// PTHREAD_DESTRUCTOR_ITERATIONS times to clear the slots.
+// NOTE: If the thread is not created by brpc server and lifetime is
+// very short(doing a little thing and exit), avoid using bthread-local. The
+// reason is that bthread-local always allocate keytable on first call to
+// bthread_setspecific, the overhead is negligible in long-lived threads,
+// but noticeable in shortly-lived threads. Threads in brpc server
+// are special since they reuse keytables from a bthread_keytable_pool_t
+// in the server.
+// Returns 0 on success, error code otherwise.
+// If the key is invalid or deleted, return EINVAL.
+extern int bthread_setspecific(bthread_key_t key, void* data);
+
+// Return current value of the thread-specific slot identified by `key'.
+// If bthread_setspecific() had not been called in the thread, return NULL.
+// If the key is invalid or deleted, return NULL.
+extern void* bthread_getspecific(bthread_key_t key);
+
+__END_DECLS
 
 #endif //BTHREAD_BTHREAD_H
