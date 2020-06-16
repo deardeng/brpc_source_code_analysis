@@ -191,5 +191,213 @@ extern "C" {
     int bthread_interrupt(bthread_t tid){
         return bthread::TaskGroup::interrupt(tid, bthread::get_task_control());
     }
+
+    int bthread_stop(bthread_t tid){
+      bthread::TaskGroup::set_stopped(tid);
+      return bthread_interrupt(tid);
+    }
+
+    int bthread_stopped(bthread_t tid){
+      return (int)bthread::TaskGroup::is_stopped(tid);
+    }
+
+    bthread_t bthread_self(void){
+      bthread::TaskGroup* g = bthread::tls_task_group;
+      // note: return 0 for main tasks new, which include main thread and
+      // all work threads. So that we can identify main tasks from logs
+      // more easily. This is probably questionable in future.
+      if (g != NULL && !g->is_current_main_task()/* note*/){
+        return g->current_tid();
+      }
+      return INVALID_BTHREAD;
+    }
+
+    int bthread_equal(bthread_t t1, bthread_t t2){
+      return t1 == t2;
+    }
+
+    void bthread_exit(void* retval){
+      bthread::TaskGroup* g = bthread::tls_task_group;
+      if (g != NULL && !g->is_current_main_task()){
+        throw bthread::ExitException(retval);
+      }else{
+        pthread_exit(retval);
+      }
+    }
+
+    int bthread_join(bthread_t tid, void** thread_return){
+      return bthread::TaskGroup::join(tid, thread_return);
+    }
+
+    int bthread_attr_init(bthread_attr_t* a){
+      *a = BTHREAD_ATTR_NORMAL;
+      return 0;
+    }
+
+    int bthread_attr_destroy(bthread_attr_t*){
+      return 0;
+    }
+
+    int bthread_getattr(bthread_t tid, bthread_attr_t* attr){
+      return bthread::TaskGroup::get_attr(tid, attr);
+    }
+
+    int bthread_getconcurrency(void){
+      return bthread::FLAGS_bthread_concurrency;
+    }
+
+    int bthread_setconcurrency(int num){
+      if (num < BTHREAD_MIN_CONCURRENCY || num > BTHREAD_MAX_CONCURRENCY){
+        LOG(ERROR) << "Invalid concurrency=" << num;
+        return EINVAL;
+      }
+      if (bthread::FLAGS_bthread_min_concurrency > 0){
+        if (num < bthread::FLAGS_bthread_min_concurrency){
+          return EINVAL;
+        }
+        if (bthread::never_set_bthread_concurrency){
+          bthread::never_set_bthread_concurrency = false;
+        }
+        bthread::FLAGS_bthread_concurrency = num;
+        return 0;
+      }
+      bthread::TaskControl* c = bthread::get_task_control();
+      if (c != NULL){
+        if (num < c->concurrency()){
+          return EPERM;
+        }else if (num == c->concurrency()){
+          return 0;
+        }
+      }
+      BAIDU_SCOPED_LOCK(bthread::g_task_control_mutex);
+      c = bthread::get_task_control();
+      if (c == NULL){
+        if (bthread::never_set_bthread_concurrency){
+          bthread::never_set_bthread_concurrency = false;
+          bthread::FLAGS_bthread_concurrency = num;
+        }else if (num > bthread::FLAGS_bthread_concurrency){
+          bthread::FLAGS_bthread_concurrency = num;
+        }
+        return 0;
+      }
+      if (bthread::FLAGS_bthread_concurrency != c->concurrency()){
+        LOG(ERROR) << "CHECK failed: bthread_concurrency="
+                   << bthread::FLAGS_bthread_concurrency
+                   << " != tc_concurrency=" << c->concurrency();
+        bthread::FLAGS_bthread_concurrency = c->concurrency();
+      }
+      if (num > bthread::FLAGS_bthread_concurrency){
+        // Create more workers if needed.
+        bthread::FLAGS_bthread_concurrency += c->add_workers(num - bthread::FLAGS_bthread_concurrency);
+        return 0;
+      }
+      return (num == bthread::FLAGS_bthread_concurrency ? 0 : EPERM);
+    }
+
+    int bthread_about_to_quit(){
+      bthread::TaskGroup* g = bthread::tls_task_group;
+      if (g != NULL){
+        return ENOMEM;
+      }
+      bthread::TimerThread* tt = bthread::get_or_create_global_timer_thread();
+      if (tt == NULL){
+        return ENOMEM;
+      }
+      bthread_timer_t tmp = tt->schedule(on_timer, arg, abstime);
+      if (tmp != 0){
+        *id = tmp;
+        return 0;
+      }
+      return ESTOP;
+    }
+
+    int bthread_timer_del(bthread_timer_t id){
+      bthread::TaskControl* c = bthread::get_task_control();
+      if( c != NULL){
+        bthread::TimerThread* tt = bthread::get_global_timer_thread();
+        if (tt == NULL){
+          return EINVAL;
+        }
+        const int state = tt->unschedule(id);
+        if (state >= 0){
+          return state;
+        }
+      }
+      return EINVAL;
+    }
+
+    int bthread_usleep(uint64_t microseconds){
+      bthread::TaskGroup* g = bthread::tls_task_group;
+      if ( NULL != g && !g->is_current_pthread_task()){
+        return bthread::TaskGroup::usleep(&g, microseconds);
+      }
+      return ::usleep(microseconds);
+    }
+
+    int bthread_yield(void){
+      bthread::TaskGroup* g = bthread::tls_task_group;
+      if( NULL != g && !g->is_current_pthread_task()){
+        return bthread::TaskGroup::yield(&g);
+        return 0;
+      }
+      // pthread_yield is not available on MAC
+      return sched_yield();
+    }
+
+    int bthread_set_worker_startfn(void (*start_fn)()){
+      if (start_fn == NULL){
+        return EINVAL;
+      }
+      bthread::g_worker_startfn = start_fn;
+      return 0;
+    }
+
+    void bthread_stop_world(){
+      bthread::TaskControl* c = bthread::get_task_control();
+      if(c != NULL){
+        c->stop_and_join();
+      }
+    }
+
+    int bthread_list_init(bthread_list_t* list, unsigned /*size*/, unsigned /*conflict_size*/){
+      list->impl = new (std::nothrow)bthread::TidList;
+      if (NULL == list->impl){
+        return ENOMEM;
+      }
+      // Set unused fields to zero as well.
+      list->head = 0;
+      list->size = 0;
+      list->conflict_head = 0;
+      list->conflict_size = 0;
+      return 0;
+    }
+
+    void bthread_list_destroy(bthread_list_t* list){
+      delete static_cast<bthread::TidList*>(list->impl);
+      list->impl = NULL;
+    }
+
+    int bthread_list_add(bthread_list_t* list, bthread_t id){
+      if (list->impl == NULL){
+        return EINVAL;
+      }
+      return static_cast<bthread::TidList*>(list->impl)->add(id);
+    }
+
+    int bthread_list_stop(bthread_list_t* list){
+      if (list->impl == NULL){
+        return EINVAL;
+      }
+      static_cast<bthread::TidList*>(list->impl)->apply(bthread::TidStopper());
+      return 0;
+    }
+
+    int bthread_list_join(bthread_list_t* list){
+      if (list->impl == NULL){
+        return EINVAL;
+      }
+      static_cast<bthread::TidList*>(list->impl)->apply(bthread::TidJoiner());
+      return 0;
+    }
 }
 
