@@ -3,4 +3,4 @@ project(dbrpc)
 
 set(CMAKE_CXX_STANDARD 14)
 
-add_executable(dbrpc main.cpp bthread.h bthread.cpp)
+add_executable(dbrpc main.cpp bthread.h bthread.cpp task_control.h task_control.cpp)
