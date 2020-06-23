@@ -845,4 +845,61 @@ int TaskGroup::interrupt(bthread_t tid, TaskControl* c){
   }
   return 0;
 }
+
+void TaaskGroup::yield(TaskGroup** pg){
+  TaskGroup* g = *pg;
+  ReadyToRunArgs args = {g->current_tid(), false};
+  g->set_remained(ready_to_run_in_worker, &args);
+  sched(pg);
+}
+
+void print_task(std::ostream& os, bthread_t tid){
+  TaskMeta* const m = TaskGroup::address_meta(tid);
+  if (m == NULL){
+    os << "bthread=" << tid << " : never existed";
+    return;
+  }
+  const uint32_t given_ver = get_version(tid);
+  bool matched = false;
+  bool stop = false;
+  bool interrupted = false;
+  bool about_to_quit = false;
+  void* (*fn)(void*) = NULL;
+  void* arg = NULL;
+  bthread_attr_t attr = BTHREAD_ATTR_NORMAL;
+  bool has_tls = false;
+  int64_t cpuwide_start_ns = 0;
+  TaskStatistics stat = {0, 0};
+  {
+    BAIDU_SCOPED_LOCK(m->version_lock);
+    if (given_ver == *m->version_butex){
+      matched = true;
+      stop = m->stop;
+      interrupted = m->interrupted;
+      about_to_quit = m->about_to_quit;
+      fn = m->fn;
+      arg = m->arg;
+      attr = m->attr;
+      has_tls = m->local_storage.keytable;
+      cpuwide_start_ns = m->cpuwide_start_ns;
+      stat = m->stat;
+    }
+  }
+  if (!matched){
+    os << "bthread=" << tid << " : not exist now";
+  }else{
+    os << "bthread=" << tid << " :\nstop=" << stop
+    << "\ninterrupted=" << interrupted
+    << "\nabout_to_quit=" << about_to_quit
+    << "\nfn=" << (void*)fn
+    << "\narg=" << (void*)arg
+    << "\nattr={stack_type=" << attr.stack_type
+    << " flags=" << attr.flags
+    << " keytable_pool=" << attr.keytable_pool
+    << "}\nhas_tls=" << has_tls
+    << "\nuptime_ns=" << butil::cpuwide_time_ns() - cpuwide_start_ns
+    << "\ncputime_ns=" << stat.cputime_ns
+    << "\nnswitch=" << stat.nswitch;
+  }
+}
 }
