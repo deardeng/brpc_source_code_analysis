@@ -280,14 +280,34 @@ brpc中的Socket类对象代表Client端与Server端的一条TCP连接，其中�
    ![image][pic2]
 4. 因为IsWriteComplete返回了false，仍然有待写数据要写，但接下来的写操作不能再由bthread 1负责，因为剩下的待写数据也不能保证一次都写完，bthread 1不可能去等待fd的内核inode输出缓存是否有可用空间，否则会令bthread 1所在的整个pthread线程卡顿，pthread私有的TaskGroup上的任务队列中其他bthread就得不到及时执行了，也就不是wait-free了。因此bthread 1创建了一个新的KeepWrite bthread专门负责剩余数据的发送，bthread 1即刻返回（bthread 1到这里也就完成了任务，会被挂起，yield让出cpu）。
 5. T3时刻起，KeepWrite bthread得到了调度，被某一个pthread执行，开始写之前剩余的数据。假设一次向fd的写操作执行后，WriteRequest 1、WriteRequest 2中的数据全部写完（WriteRequest对象随机被回收内存），WriteRequest 3写了一部分，并且此时又有其他两个bthread向_write_head链表中新加入了待写数据WriteRequest 4和WriteRequest 5，此时内存结构为：
-   ![image][pic3]
+   ![image][pic3]))
 6. KeepWrite bthread执行IsWriteComplete判断之前已翻转过的链表是否已全部写完，并在IsWriteComplete内部通过_write_head.compare_exchange_strong原子操作检测之前新增的待写数据WriteRequest4、5，并完成WriteRequest 5 -> 4 -> 3链表的翻转。假设在_write_head.compare_exchange_strong执行之后立即有其他bthread又向_write_head链表中新加入了待写数据WriteRequest 6和WriteRequest 7，但WriteRequest 6和7在_write_head.compare_exchange_strong一旦被调用之后是暂时被无视的，等到下一轮调用IsWriteComplete时才会被发现（通过_write_head.compare_exchange_strong发现最新的_write_head不等于之前已被翻转的链表的尾节点）。此时内存结构为：
     ![image][pic4]
 7. KeepWrite bthread调用IsWriteComplete返回后，cur_tail指针指向的是当前最新的已翻转链表的尾节点，即WriteRequest 5。然后继续尽可能多的向fd写一次数据，一次写操作后再调用IsWriteComplete判断当前已翻转的链表是否已全部写完、_write_head链表是否有新加入的待写数据，会发现之前新加入的WriteRequest 6和WriteRequest 7，再将WriteRequest 6、7加入翻转链表...如此循环反复。只有在IsWriteComplete中判断出已翻转链表的待写数据已全部写入fd、且当前最新的_write_head指向翻转链表的尾节点时，KeepWrite bthread才会执行结束。如果紧接着又有其他bthread试图向fd写入数据，则重复步骤1开始的过程。所以同一时刻针对一个TCP连接不会同时存在多个KeepWrite bthread，一个TCP连接上最多只会有一个KeepWrite bthread在工作。
 8. KeepWrite bthread在向fd写数据时，fd一般被设为非阻塞，如果fd的内核inode输出缓存已满，对fd调用::write（或者::writev）会返回-1且errno为EAGAIN。这时候KeepWrite bthread不能去主动等待fd是否可写，必须要挂起，yield让出cpu，让KeepWrite bthread所在的pthread接着去调度执行私有的TaskGroup的任务队列中的下一个bthread,负责pthread就会卡住，影响了TaskGroup任务队列中其他bthread的执行，这违背了wait-free的设计思想。等到内核inode输出缓存有了可用空间时，epoll会返回fd的可写事件，epoll所在的bthread会唤醒KeepWrite bthread，KeepWrite bthread的id会被重新加入某个TaskGroup的任务队列，从而会被重新调度执行，继续向fd写入数据。
 
+## 传统RPC框架从fd读取数据的方式
+传统RPC框架一般会区分I/O线程和worker线程，一台机器上处理的所有fd会散列到多个I/O线程上，每个I/O线程在其私有的EventLoop对象上执行类似下面这样的循环：
+```c++
+while(!stop){
+    int n = epoll_wait();
+    for (int i=0; i<n; ++i) {
+        if (event is EPOLLIN) {
+            // read data from fd
+            // push pointer of reference of data to task queue
+        }
+    }
+}
+```
+I/O线程从每个fd上读取到数据后，将已读取数据的指针或引用封装在一个Task对象中，再将Task的指针压入一个全局的任务队列，worker线程从任务队列中拿到报文并进行业务处理。这种方式存在以下几个问题：
+1. 一个I/O线程同一时刻只能从一个fd读取数据，数据从fd的inode内核缓存读取到应用层缓冲区是一个相对较慢的操作，读取顺序越靠后的fd，其上面的数据读取、处理越可能产生延迟。实际场景中，如果10个客户端同一时刻分别通过10条TCP连接向一个服务器发送请求，假设服务器只开启一个I/O线程，epoll同时通知10个fd有数据可读，I/O线程只能先读完第一个fd，在读去第二个fd...可能等到读第9、第10个fd时，客户端已经报超时了。但实际上10个客户端是同一时刻发送的请求，服务器的读取数据顺序却有先有后，这对客户端来说是不公平的；
+2. 多个I/O线程都会将Task压入一个全局的任务队列，会产生锁竞争；多个worker线程从全局任务队列中获取任务，也会产生锁竞争，这都会降低性能。并且多个worker线程从长久看很难获取到均匀的任务数量，例如有4个worker线程同时去任务队列拿任务，worker 1竞争锁成功，拿到任务后去处理，然后worker 2拿到任务，接着worker 3拿到任务，再然后worker 1可能已经处理任务完毕，又来和worker 4竞争全局队列的锁，可能worker 1又再次竞争成功，worker 4还是饿着，这就造成了任务没有在各个worker线程间均匀分配；
+3. I/O线程从fd的inode内核缓存读取数据到应用层缓冲区，worker线程需要处理这块内存上的数据，内存数据同步到执行worker线程的cpu的cacheline上需要耗费时间。
 
-
+## brpc实现的读取数据方式
+brpc没有专门的I/O线程，只有worker线程，epoll_wait()也是在bthread中被执行。当一个fd可读时：
+1. 读取动作并不是在epoll_wait()所在的bthread 1上执行，而是会通过TaskGroup::start_foreground()新建一个bthread 2，bthread 2负责将fd的inode内核输入缓存中的数据读到应用层缓冲区，pthread执行流会立即进入bthread 2，bthread 1会被加入任务队列的尾部，可能会被steal到其他pthread上执行；
+2. bthread 2进行拆包时，每解析出一个完整的应用层报文，就会为每个报文的处理再专门创建一个bthread，所以bthread 2可能会创建bthread 3、4、5...这样的设计意图是尽量让一个fd上读出的各个报文也得到最大化的并发处理。
 
 
 
