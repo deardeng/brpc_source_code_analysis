@@ -15,9 +15,11 @@ void foo(int a, int b){
 ```
 执行到foo函数中的执行点1时，线程A的栈帧如下图所示：
 ![image][pic1]
+
+
 线程A从bar()函数返回，执行到执行点2时，先销毁bar()函数的形参m，再销毁bar()的栈帧，从foo()函数返回后，先销毁局部变量c，接着销毁形参b、a，最后销毁foo()的栈栈。
 像上述这种在foo()函数内调用bar()函数的过程，必须等到bar函数return后，foo()函数才从bar()函数的返回点恢复执行。
-一个协程可以看做是一个单独的任务，相应的也有一个任务处理函数。对协程来说最重要的两个操作时yield和resume（yield和resume的实现见下文描述），yield是指一个正在被pthread系统线程执行的协程被挂起，让出cpu的使用权，pthread继续去执行另一个协程的任务函数，从协程角度看是协程中止了运行，从系统线程角度看pthread继续在运行；resume是指一个被中止的协程的任务函数重新被pthread执行，恢复执行点为上一次yield操作的返回点。
+一个协程可以看做是一个单独的任务，相应的也有一个任务处理函数。对协程来说最重要的两个操作是yield和resume（yield和resume的实现见下文描述），yield是指一个正在被pthread系统线程执行的协程被挂起，让出cpu的使用权，pthread继续去执行另一个协程的任务函数，从协程角度看是协程中止了运行，从系统线程角度看pthread继续在运行；resume是指一个被中止的协程的任务函数重新被pthread执行，恢复执行点为上一次yield操作的返回点。
 有了yield和resume这两个原语，可以实现pthread线程执行流在不同函数间的跳转，只需要将函数作为协程的任务函数即可。一个线程执行一个协程A的任务处理函数taskFunc_A时，如果想要去执行另一个协程B的任务处理函数taskFunc_B，不必等到taskFunc_A执行到return语句，可以在taskFunc_A内执行一个yield语句，然后线程执行流可以从taskFunc_A中跳出，去执行taskFunc_B。如果想让taskFunc_A恢复执行，则调用一个resume语句，让taskFunc_A从yield语句的返回处开始继续执行，并且taskFunc_A的执行结果不受yield的影响。
 
 ## 协程的原理与实现方式
